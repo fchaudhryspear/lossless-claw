@@ -133,15 +133,16 @@ When choosing which model to use for summarization, lossless-claw follows this p
 1. Plugin config `summaryModel` (from `plugins.entries.lossless-claw.config.summaryModel`)
 2. Environment variable `LCM_SUMMARY_MODEL`
 3. OpenClaw's `agents.defaults.compaction.model` (if configured)
-4. Current session model (inherited from the active conversation)
-5. OpenClaw's `agents.defaults.model.primary` (system default)
+4. Legacy call-site model hint (`params.legacyParams.model`) if none of the explicit config sources above provide a summary model
 
-`summaryProvider` is not an independent selector. It is only used when the chosen `summaryModel` is a bare model name without a provider prefix. If no explicit `summaryProvider` is configured for that level, lossless-claw falls back to the active session provider hint and emits a warning.
+`summaryProvider` is not an independent selector. It is only used when the chosen `summaryModel` is a bare model name without a provider prefix. If no explicit `summaryProvider` is configured at the same level, lossless-claw falls back to the legacy call-site provider hint (`params.legacyParams.provider`) and emits a warning.
+
+After that, OpenClaw's normal `resolveModel(...)` behavior still applies, so inherited session or system defaults may be used only if the earlier sources did not fully resolve the model.
 
 This allows you to:
 - Set a global summarization model via plugin config or environment variable
 - Reuse OpenClaw's compaction model configuration when available
-- Fall back gracefully to session or system defaults when nothing is explicitly configured
+- Fall back to legacy call-site hints, then to OpenClaw's normal session or system defaults when nothing more explicit is configured
 
 ### Recommended starting configuration
 
