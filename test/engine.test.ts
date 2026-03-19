@@ -15,6 +15,7 @@ import {
   resetDelegatedExpansionGrantsForTests,
   resolveDelegatedExpansionGrantId,
 } from "../src/expansion-auth.js";
+import { RetrievalEngine } from "../src/retrieval.js";
 import type { LcmDependencies } from "../src/types.js";
 
 const tempDirs: string[] = [];
@@ -952,6 +953,116 @@ describe("LcmContextEngine.ingest content extraction", () => {
         .getSummaryStore()
         .getLargeFilesByConversation(conversation!.conversationId);
       expect(largeFiles).toHaveLength(0);
+    });
+  });
+
+  it("externalizes oversized tool-result payloads into large_files", async () => {
+    await withTempHome(async () => {
+      const engine = createEngineWithConfig({ largeFileTokenThreshold: 20 });
+      const sessionId = randomUUID();
+      const toolOutput = `${"tool output line\n".repeat(160)}done`;
+
+      await engine.ingest({
+        sessionId,
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call_externalized",
+              name: "exec",
+              input: { cmd: "pwd" },
+            },
+          ],
+        } as AgentMessage,
+      });
+
+      await engine.ingest({
+        sessionId,
+        message: {
+          role: "toolResult",
+          toolCallId: "call_externalized",
+          toolName: "exec",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call_externalized",
+              name: "exec",
+              content: [{ type: "text", text: toolOutput }],
+            },
+          ],
+        } as AgentMessage,
+      });
+
+      const conversation = await engine
+        .getConversationStore()
+        .getConversationBySessionId(sessionId);
+      expect(conversation).not.toBeNull();
+
+      const storedMessages = await engine
+        .getConversationStore()
+        .getMessages(conversation!.conversationId);
+      expect(storedMessages).toHaveLength(2);
+      expect(storedMessages[1].content).toContain("[LCM Tool Output: file_");
+      expect(storedMessages[1].content).toContain("tool=exec");
+      expect(storedMessages[1].content).not.toContain(toolOutput.slice(0, 64));
+
+      const fileIdMatch = storedMessages[1].content.match(/file_[a-f0-9]{16}/);
+      expect(fileIdMatch).not.toBeNull();
+      const fileId = fileIdMatch![0];
+
+      const storedFile = await engine.getSummaryStore().getLargeFile(fileId);
+      expect(storedFile).not.toBeNull();
+      expect(storedFile!.fileName).toBe("exec.txt");
+      expect(storedFile!.mimeType).toBe("text/plain");
+      expect(readFileSync(storedFile!.storageUri, "utf8")).toBe(toolOutput);
+
+      const parts = await engine.getConversationStore().getMessageParts(storedMessages[1].messageId);
+      expect(parts).toHaveLength(1);
+      expect(parts[0].partType).toBe("tool");
+      const metadata = JSON.parse(parts[0].metadata ?? "{}") as Record<string, unknown>;
+      expect(metadata).toMatchObject({
+        externalizedFileId: fileId,
+        originalByteSize: Buffer.byteLength(toolOutput, "utf8"),
+        toolOutputExternalized: true,
+        externalizationReason: "large_tool_result",
+      });
+
+      const assembler = new ContextAssembler(engine.getConversationStore(), engine.getSummaryStore());
+      const assembled = await assembler.assemble({
+        conversationId: conversation!.conversationId,
+        tokenBudget: 10_000,
+      });
+      expect(assembled.messages).toHaveLength(2);
+      const assembledToolResult = assembled.messages[1] as {
+        role: string;
+        content?: Array<{ output?: unknown }>;
+      };
+      expect(assembledToolResult.role).toBe("toolResult");
+      expect(typeof assembledToolResult.content?.[0]?.output).toBe("string");
+      expect(String(assembledToolResult.content?.[0]?.output)).toContain(fileId);
+
+      const retrieval = new RetrievalEngine(
+        engine.getConversationStore(),
+        engine.getSummaryStore(),
+      );
+      const described = await retrieval.describe(fileId);
+      expect(described?.type).toBe("file");
+      expect(described?.file?.storageUri).toBe(storedFile!.storageUri);
+
+      const searchable = await engine.getConversationStore().searchMessages({
+        conversationId: conversation!.conversationId,
+        query: "exec",
+        mode: "full_text",
+      });
+      expect(searchable).toHaveLength(1);
+
+      const noisy = await engine.getConversationStore().searchMessages({
+        conversationId: conversation!.conversationId,
+        query: "lcm_describe",
+        mode: "full_text",
+      });
+      expect(noisy).toHaveLength(0);
     });
   });
 

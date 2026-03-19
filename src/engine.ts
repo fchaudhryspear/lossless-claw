@@ -31,6 +31,7 @@ import {
 import {
   extensionFromNameOrMime,
   formatFileReference,
+  formatToolOutputReference,
   generateExplorationSummary,
   parseFileBlocks,
 } from "./large-files.js";
@@ -169,6 +170,15 @@ function extractStructuredText(value: unknown, depth: number = 0): string | unde
 
   // Skip tool call/result objects — their structured data belongs in the parts table, not content
   if (typeof record.type === "string" && TOOL_RAW_TYPES.has(record.type)) {
+    if (safeBoolean(record.toolOutputExternalized)) {
+      const externalizedText =
+        extractStructuredText(record.output, depth + 1) ??
+        extractStructuredText(record.content, depth + 1) ??
+        extractStructuredText(record.result, depth + 1);
+      if (typeof externalizedText === "string" && externalizedText.trim().length > 0) {
+        return externalizedText;
+      }
+    }
     return undefined;
   }
 
@@ -565,6 +575,13 @@ function buildMessageParts(params: {
         toolCallId: topLevelToolCallId,
         toolName: topLevelToolName,
         isError: topLevelIsError,
+        externalizedFileId: safeString(metadataRecord?.externalizedFileId),
+        originalByteSize:
+          typeof metadataRecord?.originalByteSize === "number"
+            ? metadataRecord.originalByteSize
+            : undefined,
+        toolOutputExternalized: safeBoolean(metadataRecord?.toolOutputExternalized),
+        externalizationReason: safeString(metadataRecord?.externalizationReason),
         rawType: block.type,
         raw: metadataRecord ?? message.content[ordinal],
       }),
@@ -1277,6 +1294,53 @@ export class LcmContextEngine implements ContextEngine {
     return filePath;
   }
 
+  /** Persist a large text payload and return the resulting compact placeholder. */
+  private async externalizeLargeTextPayload(params: {
+    conversationId: number;
+    content: string;
+    fileName?: string;
+    mimeType?: string;
+    formatReference: (input: { fileId: string; byteSize: number; summary: string }) => string;
+  }): Promise<{ fileId: string; byteSize: number; summary: string; reference: string }> {
+    const summarizeText = await this.resolveLargeFileTextSummarizer();
+    const fileId = `file_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const extension = extensionFromNameOrMime(params.fileName, params.mimeType);
+    const storageUri = await this.storeLargeFileContent({
+      conversationId: params.conversationId,
+      fileId,
+      extension,
+      content: params.content,
+    });
+    const byteSize = Buffer.byteLength(params.content, "utf8");
+    const explorationSummary = await generateExplorationSummary({
+      content: params.content,
+      fileName: params.fileName,
+      mimeType: params.mimeType,
+      summarizeText,
+    });
+
+    await this.summaryStore.insertLargeFile({
+      fileId,
+      conversationId: params.conversationId,
+      fileName: params.fileName,
+      mimeType: params.mimeType,
+      byteSize,
+      storageUri,
+      explorationSummary,
+    });
+
+    return {
+      fileId,
+      byteSize,
+      summary: explorationSummary,
+      reference: params.formatReference({
+        fileId,
+        byteSize,
+        summary: explorationSummary,
+      }),
+    };
+  }
+
   /**
    * Intercept oversized <file> blocks before persistence and replace them with
    * compact file references backed by large_files records.
@@ -1291,7 +1355,6 @@ export class LcmContextEngine implements ContextEngine {
     }
 
     const threshold = Math.max(1, this.config.largeFileTokenThreshold);
-    const summarizeText = await this.resolveLargeFileTextSummarizer();
     const fileIds: string[] = [];
     const rewrittenSegments: string[] = [];
     let cursor = 0;
@@ -1304,44 +1367,25 @@ export class LcmContextEngine implements ContextEngine {
       }
 
       interceptedAny = true;
-      const fileId = `file_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-      const extension = extensionFromNameOrMime(block.fileName, block.mimeType);
-      const storageUri = await this.storeLargeFileContent({
+      const externalized = await this.externalizeLargeTextPayload({
         conversationId: params.conversationId,
-        fileId,
-        extension,
-        content: block.text,
-      });
-      const byteSize = Buffer.byteLength(block.text, "utf8");
-      const explorationSummary = await generateExplorationSummary({
         content: block.text,
         fileName: block.fileName,
         mimeType: block.mimeType,
-        summarizeText,
-      });
-
-      await this.summaryStore.insertLargeFile({
-        fileId,
-        conversationId: params.conversationId,
-        fileName: block.fileName,
-        mimeType: block.mimeType,
-        byteSize,
-        storageUri,
-        explorationSummary,
+        formatReference: ({ fileId, byteSize, summary }) =>
+          formatFileReference({
+            fileId,
+            fileName: block.fileName,
+            mimeType: block.mimeType,
+            byteSize,
+            summary,
+          }),
       });
 
       rewrittenSegments.push(params.content.slice(cursor, block.start));
-      rewrittenSegments.push(
-        formatFileReference({
-          fileId,
-          fileName: block.fileName,
-          mimeType: block.mimeType,
-          byteSize,
-          summary: explorationSummary,
-        }),
-      );
+      rewrittenSegments.push(externalized.reference);
       cursor = block.end;
-      fileIds.push(fileId);
+      fileIds.push(externalized.fileId);
     }
 
     if (!interceptedAny) {
@@ -1351,6 +1395,117 @@ export class LcmContextEngine implements ContextEngine {
     rewrittenSegments.push(params.content.slice(cursor));
     return {
       rewrittenContent: rewrittenSegments.join(""),
+      fileIds,
+    };
+  }
+
+  /** Externalize oversized textual tool outputs before they are persisted inline. */
+  private async interceptLargeToolResults(params: {
+    conversationId: number;
+    message: AgentMessage;
+  }): Promise<{ rewrittenMessage: AgentMessage; fileIds: string[] } | null> {
+    if (params.message.role !== "toolResult" || !("content" in params.message)) {
+      return null;
+    }
+    if (!Array.isArray(params.message.content)) {
+      return null;
+    }
+
+    const threshold = Math.max(1, this.config.largeFileTokenThreshold);
+    const rewrittenContent: unknown[] = [];
+    const fileIds: string[] = [];
+    let interceptedAny = false;
+
+    for (const item of params.message.content) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        rewrittenContent.push(item);
+        continue;
+      }
+
+      const record = item as Record<string, unknown>;
+      const rawType = safeString(record.type);
+      if (
+        rawType !== "tool_result" &&
+        rawType !== "toolResult" &&
+        rawType !== "function_call_output"
+      ) {
+        rewrittenContent.push(item);
+        continue;
+      }
+
+      const textSource =
+        record.output !== undefined
+          ? record.output
+          : record.content !== undefined
+            ? record.content
+            : record;
+      const extractedText = extractStructuredText(textSource);
+      if (typeof extractedText !== "string" || estimateTokens(extractedText) < threshold) {
+        rewrittenContent.push(item);
+        continue;
+      }
+
+      interceptedAny = true;
+      const toolName =
+        safeString(record.name) ??
+        safeString((params.message as Record<string, unknown>).toolName) ??
+        "tool-result";
+      const externalized = await this.externalizeLargeTextPayload({
+        conversationId: params.conversationId,
+        content: extractedText,
+        fileName: `${toolName}.txt`,
+        mimeType: "text/plain",
+        formatReference: ({ fileId, byteSize, summary }) =>
+          formatToolOutputReference({
+            fileId,
+            toolName,
+            byteSize,
+            summary,
+          }),
+      });
+
+      const compactBlock: Record<string, unknown> = {
+        type: rawType,
+        output: externalized.reference,
+        externalizedFileId: externalized.fileId,
+        originalByteSize: externalized.byteSize,
+        toolOutputExternalized: true,
+        externalizationReason: "large_tool_result",
+      };
+      const callId =
+        safeString(record.tool_use_id) ??
+        safeString(record.toolUseId) ??
+        safeString(record.call_id);
+      if (callId) {
+        if (rawType === "function_call_output") {
+          compactBlock.call_id = callId;
+        } else {
+          compactBlock.tool_use_id = callId;
+        }
+      }
+      if (typeof record.is_error === "boolean") {
+        compactBlock.is_error = record.is_error;
+      }
+      if (typeof record.isError === "boolean") {
+        compactBlock.isError = record.isError;
+      }
+      if (toolName) {
+        compactBlock.name = toolName;
+      }
+
+      rewrittenContent.push(compactBlock);
+      fileIds.push(externalized.fileId);
+    }
+
+    if (!interceptedAny) {
+      return null;
+    }
+
+    return {
+      rewrittenMessage: {
+        ...params.message,
+        content: rewrittenContent,
+      } as AgentMessage,
       fileIds,
     };
   }
@@ -1774,6 +1929,17 @@ export class LcmContextEngine implements ContextEngine {
             content: stored.content,
           } as AgentMessage;
         }
+      }
+    } else if (stored.role === "tool") {
+      const intercepted = await this.interceptLargeToolResults({
+        conversationId,
+        message,
+      });
+      if (intercepted) {
+        messageForParts = intercepted.rewrittenMessage;
+        const rewrittenStored = toStoredMessage(intercepted.rewrittenMessage);
+        stored.content = rewrittenStored.content;
+        stored.tokenCount = rewrittenStored.tokenCount;
       }
     }
 
