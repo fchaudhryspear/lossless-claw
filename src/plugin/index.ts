@@ -1197,13 +1197,13 @@ function createLcmDependencies(api: OpenClawPluginApi): LcmDependencies {
             );
           }
         }
-        if (!resolvedApiKey && !modelAuth) {
+        if (!resolvedApiKey) {
           resolvedApiKey = resolveApiKey(providerId, readEnv);
         }
-        if (!resolvedApiKey && !modelAuth && typeof mod.getEnvApiKey === "function") {
+        if (!resolvedApiKey && typeof mod.getEnvApiKey === "function") {
           resolvedApiKey = mod.getEnvApiKey(providerId)?.trim();
         }
-        if (!resolvedApiKey && !modelAuth) {
+        if (!resolvedApiKey) {
           resolvedApiKey = await resolveApiKeyFromAuthProfiles({
             provider: providerId,
             authProfileId,
