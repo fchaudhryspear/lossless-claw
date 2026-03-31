@@ -228,6 +228,30 @@ function readDefaultModelFromConfig(config: unknown): string {
   return typeof primary === "string" ? primary.trim() : "";
 }
 
+/** Read OpenClaw's configured compaction model from the validated runtime config. */
+function readCompactionModelFromConfig(config: unknown): string {
+  if (!config || typeof config !== "object") {
+    return "";
+  }
+
+  const compaction = (config as {
+    agents?: {
+      defaults?: {
+        compaction?: {
+          model?: unknown;
+        };
+      };
+    };
+  }).agents?.defaults?.compaction;
+  const model = compaction?.model;
+  if (typeof model === "string") {
+    return model.trim();
+  }
+
+  const primary = (model as { primary?: unknown } | undefined)?.primary;
+  return typeof primary === "string" ? primary.trim() : "";
+}
+
 /** Format a provider/model pair for logs. */
 function formatProviderModel(params: { provider: string; model: string }): string {
   return `${params.provider}/${params.model}`;
@@ -236,11 +260,28 @@ function formatProviderModel(params: { provider: string; model: string }): strin
 /** Build a startup log showing which compaction model LCM will use. */
 function buildCompactionModelLog(params: {
   config: LcmConfig;
-  defaultModelRef: string;
+  openClawConfig: unknown;
   defaultProvider: string;
 }): string {
-  const usingOverride = Boolean(params.config.summaryModel || params.config.summaryProvider);
-  const raw = (params.config.summaryModel || params.defaultModelRef).trim();
+  const envSummaryModel = process.env.LCM_SUMMARY_MODEL?.trim() ?? "";
+  const envSummaryProvider = process.env.LCM_SUMMARY_PROVIDER?.trim() ?? "";
+  const pluginSummaryModel = params.config.summaryModel.trim();
+  const pluginSummaryProvider = params.config.summaryProvider.trim();
+  const compactionModelRef = readCompactionModelFromConfig(params.openClawConfig);
+  const defaultModelRef = readDefaultModelFromConfig(params.openClawConfig);
+  const selected =
+    envSummaryModel
+      ? { raw: envSummaryModel, source: "override" as const }
+      : pluginSummaryModel
+        ? { raw: pluginSummaryModel, source: "override" as const }
+        : compactionModelRef
+          ? { raw: compactionModelRef, source: "override" as const }
+          : defaultModelRef
+            ? { raw: defaultModelRef, source: "default" as const }
+            : undefined;
+  const usingOverride =
+    selected?.source === "override" || Boolean(envSummaryProvider || pluginSummaryProvider);
+  const raw = selected?.raw.trim() ?? "";
   if (!raw) {
     return "[lcm] Compaction summarization model: (unconfigured)";
   }
@@ -256,7 +297,12 @@ function buildCompactionModelLog(params: {
     }
   }
 
-  const provider = (params.config.summaryProvider || params.defaultProvider || "openai").trim();
+  const provider = (
+    envSummaryProvider ||
+    pluginSummaryProvider ||
+    params.defaultProvider ||
+    "openai"
+  ).trim();
   return `[lcm] Compaction summarization model: ${formatProviderModel({
     provider,
     model: raw,
@@ -1519,7 +1565,7 @@ const lcmPlugin = {
       log: (message) => api.logger.info(message),
       message: buildCompactionModelLog({
         config: deps.config,
-        defaultModelRef: readDefaultModelFromConfig(api.config),
+        openClawConfig: api.config,
         defaultProvider: process.env.OPENCLAW_PROVIDER?.trim() ?? "",
       }),
     });

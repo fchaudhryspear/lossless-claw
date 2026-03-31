@@ -906,6 +906,91 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       }
     });
 
+    it("falls back to the next resolved model when retry also returns an empty overloaded response", async () => {
+      const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const deps = makeDeps({
+          resolveModel: vi.fn((modelRef?: string, providerHint?: string) => {
+            if (modelRef === "anthropic/claude-opus-4-6") {
+              return { provider: "anthropic", model: "claude-opus-4-6" };
+            }
+            if (modelRef === "gpt-5.4") {
+              return { provider: providerHint ?? "openai-codex", model: "gpt-5.4" };
+            }
+            throw new Error(`unexpected modelRef: ${String(modelRef)}`);
+          }),
+          complete: vi
+            .fn()
+            .mockResolvedValueOnce({
+              content: [],
+              errorMessage: JSON.stringify({
+                type: "error",
+                error: { type: "api_error", message: "Internal server error" },
+              }),
+            })
+            .mockResolvedValueOnce({
+              content: [],
+              errorMessage: JSON.stringify({
+                type: "error",
+                error: { type: "overloaded_error", message: "Overloaded" },
+              }),
+            })
+            .mockResolvedValueOnce({
+              content: [{ type: "text", text: "Recovered summary from fallback candidate." }],
+            }),
+        });
+
+        const summarize = await createSummarizeFn({
+          deps,
+          legacyParams: {
+            provider: "openai-codex",
+            model: "gpt-5.4",
+            config: {
+              agents: {
+                defaults: {
+                  compaction: {
+                    model: "anthropic/claude-opus-4-6",
+                  },
+                  model: {
+                    primary: "openai-codex/gpt-5.4",
+                  },
+                },
+              },
+            },
+          },
+        });
+
+        const summary = await summarize!("A".repeat(8_000), false);
+
+        expect(summary).toBe("Recovered summary from fallback candidate.");
+        expect(vi.mocked(deps.complete)).toHaveBeenCalledTimes(3);
+        expect(vi.mocked(deps.complete).mock.calls[0]?.[0]).toMatchObject({
+          provider: "anthropic",
+          model: "claude-opus-4-6",
+        });
+        expect(vi.mocked(deps.complete).mock.calls[1]?.[0]).toMatchObject({
+          provider: "anthropic",
+          model: "claude-opus-4-6",
+          reasoning: "low",
+        });
+        expect(vi.mocked(deps.complete).mock.calls[2]?.[0]).toMatchObject({
+          provider: "openai-codex",
+          model: "gpt-5.4",
+        });
+
+        const warningText = consoleWarn.mock.calls.flatMap((call) => call.map(String)).join(" ");
+        expect(warningText).toContain("retrying with openai-codex/gpt-5.4");
+        expect(warningText).toContain("retry also returned empty summary");
+
+        const errorText = consoleError.mock.calls.flatMap((call) => call.map(String)).join(" ");
+        expect(errorText).not.toContain("falling back to truncation");
+      } finally {
+        consoleWarn.mockRestore();
+        consoleError.mockRestore();
+      }
+    });
+
     it("retries the same model with direct credentials before falling back to another provider", async () => {
       const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {

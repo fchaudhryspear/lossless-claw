@@ -96,6 +96,32 @@ function defaultModelConfig(model: string): Record<string, unknown> {
   };
 }
 
+function compactionAndDefaultModelConfig(params: {
+  compactionModel?: string;
+  defaultModel?: string;
+}): Record<string, unknown> {
+  return {
+    agents: {
+      defaults: {
+        ...(params.defaultModel
+          ? {
+              model: {
+                primary: params.defaultModel,
+              },
+            }
+          : {}),
+        ...(params.compactionModel
+          ? {
+              compaction: {
+                model: params.compactionModel,
+              },
+            }
+          : {}),
+      },
+    },
+  };
+}
+
 describe("lcm plugin registration", () => {
   const dbPaths = new Set<string>();
   const tempDirs = new Set<string>();
@@ -356,6 +382,40 @@ describe("lcm plugin registration", () => {
 
     expect(infoLog).toHaveBeenCalledWith(
       "[lcm] Compaction summarization model: openai-resp/gpt-5.4 (override)",
+    );
+  });
+
+  it("logs the OpenClaw compaction model at startup when no plugin override is set", () => {
+    const { api, infoLog } = buildApi({
+      enabled: true,
+    });
+    api.config = compactionAndDefaultModelConfig({
+      compactionModel: "anthropic/claude-opus-4-6",
+      defaultModel: "openai-codex/gpt-5.4",
+    }) as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Compaction summarization model: anthropic/claude-opus-4-6 (override)",
+    );
+  });
+
+  it("prefers env summary overrides over the OpenClaw compaction model in the startup banner", () => {
+    vi.stubEnv("LCM_SUMMARY_PROVIDER", "openai-codex");
+    vi.stubEnv("LCM_SUMMARY_MODEL", "gpt-5.4");
+    const { api, infoLog } = buildApi({
+      enabled: true,
+    });
+    api.config = compactionAndDefaultModelConfig({
+      compactionModel: "anthropic/claude-opus-4-6",
+      defaultModel: "openai-codex/gpt-5.3-codex",
+    }) as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Compaction summarization model: openai-codex/gpt-5.4 (override)",
     );
   });
 

@@ -1112,6 +1112,7 @@ export async function createLcmSummarizeFromLegacyParams(params: {
       const candidate = resolvedCandidates[index]!;
       const provider = candidate.provider;
       const model = candidate.model;
+      const nextCandidate = index < resolvedCandidates.length - 1 ? resolvedCandidates[index + 1]! : undefined;
       const authProfileId = candidate.useLegacyAuthProfile ? legacyAuthProfileId : undefined;
       const providerApi = resolveProviderApiFromLegacyConfig(params.legacyParams.config, provider);
       const lookupOptions = {
@@ -1226,8 +1227,7 @@ export async function createLcmSummarizeFromLegacyParams(params: {
       } catch (err) {
         if (err instanceof LcmProviderAuthError) {
           lastAuthError = err;
-          if (index < resolvedCandidates.length - 1) {
-            const nextCandidate = resolvedCandidates[index + 1]!;
+          if (nextCandidate) {
             console.warn(
               `[lcm] summarizer auth fallback: retrying with ${nextCandidate.provider}/${nextCandidate.model} after ${provider}/${model} failed auth.`,
             );
@@ -1240,6 +1240,12 @@ export async function createLcmSummarizeFromLegacyParams(params: {
         console.warn(
           `[lcm] summarizer ${isTimeout ? "timed out" : "failed"}; provider=${provider}; model=${model}; timeout=${SUMMARIZER_TIMEOUT_MS}ms; error=${errMsg}`,
         );
+        if (nextCandidate) {
+          console.warn(
+            `[lcm] summarizer candidate fallback: retrying with ${nextCandidate.provider}/${nextCandidate.model} after ${provider}/${model} ${isTimeout ? "timed out" : "failed"}.`,
+          );
+          continue;
+        }
         if (err instanceof SummarizerTimeoutError) {
           console.error(
             `[lcm] summarizer timed out; provider=${provider}; model=${model}; source=fallback`,
@@ -1322,14 +1328,19 @@ export async function createLcmSummarizeFromLegacyParams(params: {
             if (retryDiag) {
               retryParts.push(retryDiag);
             }
+            if (nextCandidate) {
+              console.warn(
+                `${retryParts.join("; ")}; retrying with ${nextCandidate.provider}/${nextCandidate.model}`,
+              );
+              continue;
+            }
             console.error(`${retryParts.join("; ")}; falling back to truncation`);
             summary = initialSummary;
           }
         } catch (retryErr) {
           if (retryErr instanceof LcmProviderAuthError) {
             lastAuthError = retryErr;
-            if (index < resolvedCandidates.length - 1) {
-              const nextCandidate = resolvedCandidates[index + 1]!;
+            if (nextCandidate) {
               console.warn(
                 `[lcm] summarizer auth fallback: retrying with ${nextCandidate.provider}/${nextCandidate.model} after ${provider}/${model} failed auth.`,
               );
@@ -1340,6 +1351,12 @@ export async function createLcmSummarizeFromLegacyParams(params: {
           // Retry is best-effort; log and proceed to deterministic fallback.
           const retryErrMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
           const isRetryTimeout = retryErrMsg.includes("summarizer timeout");
+          if (nextCandidate) {
+            console.warn(
+              `[lcm] retry ${isRetryTimeout ? "timed out" : "failed"}; provider=${provider}; model=${model}; timeout=${SUMMARIZER_TIMEOUT_MS}ms; error=${retryErrMsg}; retrying with ${nextCandidate.provider}/${nextCandidate.model}`,
+            );
+            continue;
+          }
           console.warn(
             `[lcm] retry ${isRetryTimeout ? "timed out" : "failed"}; provider=${provider}; model=${model}; timeout=${SUMMARIZER_TIMEOUT_MS}ms; error=${retryErrMsg}; falling back to truncation`,
           );
