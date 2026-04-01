@@ -2,38 +2,18 @@ import { statSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import packageJson from "../../package.json" with { type: "json" };
 import type { LcmConfig } from "../db/config.js";
+import type { LcmSummarizeFn } from "../summarize.js";
+import type { LcmDependencies } from "../types.js";
 import type { OpenClawPluginCommandDefinition, PluginCommandContext } from "openclaw/plugin-sdk";
+import { applyScopedDoctorRepair } from "./lcm-doctor-apply.js";
+import {
+  detectDoctorMarker,
+  getDoctorSummaryStats,
+  type DoctorSummaryStats,
+} from "./lcm-doctor-shared.js";
 
-const FALLBACK_SUMMARY_MARKER = "[LCM fallback summary; truncated for context management]";
-const TRUNCATED_SUMMARY_PREFIX = "[Truncated from ";
-const TRUNCATED_SUMMARY_WINDOW = 40;
-const FALLBACK_SUMMARY_WINDOW = 80;
 const VISIBLE_COMMAND = "/lossless";
 const HIDDEN_ALIAS = "/lcm";
-
-type DoctorMarkerKind = "old" | "new" | "fallback";
-
-type DoctorSummaryCandidate = {
-  conversationId: number;
-  summaryId: string;
-  markerKind: DoctorMarkerKind;
-};
-
-type DoctorConversationCounts = {
-  total: number;
-  old: number;
-  truncated: number;
-  fallback: number;
-};
-
-type DoctorSummaryStats = {
-  candidates: DoctorSummaryCandidate[];
-  total: number;
-  old: number;
-  truncated: number;
-  fallback: number;
-  byConversation: Map<number, DoctorConversationCounts>;
-};
 
 type LcmStatusStats = {
   conversationCount: number;
@@ -69,7 +49,7 @@ type CurrentConversationResolution =
 
 type ParsedLcmCommand =
   | { kind: "status" }
-  | { kind: "doctor" }
+  | { kind: "doctor"; apply: boolean }
   | { kind: "help"; error?: string };
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -164,116 +144,24 @@ function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
         ? { kind: "status" }
         : { kind: "help", error: "`/lcm status` does not accept extra arguments." };
     case "doctor":
-      return rest.length === 0
-        ? { kind: "doctor" }
-        : { kind: "help", error: "`/lcm doctor` does not accept extra arguments in the MVP." };
+      if (rest.length === 0) {
+        return { kind: "doctor", apply: false };
+      }
+      if (rest.length === 1 && rest[0]?.toLowerCase() === "apply") {
+        return { kind: "doctor", apply: true };
+      }
+      return {
+        kind: "help",
+        error: "`/lcm doctor` accepts no arguments, or `apply` for the scoped repair path.",
+      };
     case "help":
       return { kind: "help" };
     default:
       return {
         kind: "help",
-        error: `Unknown subcommand \`${head}\`. Supported: status, doctor.`,
+        error: `Unknown subcommand \`${head}\`. Supported: status, doctor, doctor apply.`,
       };
   }
-}
-
-function detectDoctorMarker(content: string): DoctorMarkerKind | null {
-  if (content.startsWith(FALLBACK_SUMMARY_MARKER)) {
-    return "old";
-  }
-
-  const truncatedIndex = content.indexOf(TRUNCATED_SUMMARY_PREFIX);
-  if (truncatedIndex >= 0 && content.length - truncatedIndex < TRUNCATED_SUMMARY_WINDOW) {
-    return "new";
-  }
-
-  const fallbackIndex = content.indexOf(FALLBACK_SUMMARY_MARKER);
-  if (fallbackIndex >= 0 && content.length - fallbackIndex < FALLBACK_SUMMARY_WINDOW) {
-    return "fallback";
-  }
-
-  return null;
-}
-
-function getDoctorSummaryStats(
-  db: DatabaseSync,
-  conversationId?: number,
-): DoctorSummaryStats {
-  const statement = conversationId === undefined
-    ? db.prepare(
-        `SELECT conversation_id, summary_id, COALESCE(content, '') AS content
-         FROM summaries
-         WHERE INSTR(COALESCE(content, ''), ?) > 0
-            OR INSTR(COALESCE(content, ''), ?) > 0`,
-      )
-    : db.prepare(
-        `SELECT conversation_id, summary_id, COALESCE(content, '') AS content
-         FROM summaries
-         WHERE conversation_id = ?
-           AND (
-             INSTR(COALESCE(content, ''), ?) > 0
-             OR INSTR(COALESCE(content, ''), ?) > 0
-           )`,
-      );
-  const rows = (conversationId === undefined
-    ? statement.all(FALLBACK_SUMMARY_MARKER, TRUNCATED_SUMMARY_PREFIX)
-    : statement.all(conversationId, FALLBACK_SUMMARY_MARKER, TRUNCATED_SUMMARY_PREFIX)) as Array<{
-    conversation_id: number;
-    summary_id: string;
-    content: string;
-  }>;
-
-  const candidates: DoctorSummaryCandidate[] = [];
-  const byConversation = new Map<number, DoctorConversationCounts>();
-  let old = 0;
-  let truncated = 0;
-  let fallback = 0;
-
-  for (const row of rows) {
-    const markerKind = detectDoctorMarker(row.content);
-    if (!markerKind) {
-      continue;
-    }
-
-    const current = byConversation.get(row.conversation_id) ?? {
-      total: 0,
-      old: 0,
-      truncated: 0,
-      fallback: 0,
-    };
-    current.total += 1;
-
-    switch (markerKind) {
-      case "old":
-        old += 1;
-        current.old += 1;
-        break;
-      case "new":
-        truncated += 1;
-        current.truncated += 1;
-        break;
-      case "fallback":
-        fallback += 1;
-        current.fallback += 1;
-        break;
-    }
-
-    byConversation.set(row.conversation_id, current);
-    candidates.push({
-      conversationId: row.conversation_id,
-      summaryId: row.summary_id,
-      markerKind,
-    });
-  }
-
-  return {
-    candidates,
-    total: candidates.length,
-    old,
-    truncated,
-    fallback,
-    byConversation,
-  };
 }
 
 function getLcmStatusStats(db: DatabaseSync): LcmStatusStats {
@@ -501,6 +389,7 @@ function buildHelpText(error?: string): string {
       buildStatLine(formatCommand(VISIBLE_COMMAND), "Show compact status output."),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} status`), "Show plugin, Global, and current-conversation status."),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor`), "Scan for broken or truncated summaries."),
+      buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor apply`), "Repair broken summaries in the current conversation."),
     ]),
     "",
     buildSection("🧭 Notes", [
@@ -656,16 +545,142 @@ async function buildDoctorText(params: {
   return lines.join("\n");
 }
 
+async function buildDoctorApplyText(params: {
+  ctx: PluginCommandContext;
+  db: DatabaseSync;
+  config: LcmConfig;
+  deps?: LcmDependencies;
+  summarize?: LcmSummarizeFn;
+}): Promise<string> {
+  const current = await resolveCurrentConversation(params);
+
+  if (current.kind === "unavailable") {
+    return [
+      ...buildHeaderLines(),
+      "",
+      "🩺 Lossless Claw Doctor Apply",
+      "",
+      buildSection("📍 Current conversation", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", current.reason),
+        buildStatLine("fallback", "Doctor apply is conversation-scoped, so no global repair ran."),
+      ]),
+    ].join("\n");
+  }
+
+  const stats = getDoctorSummaryStats(params.db, current.stats.conversationId);
+  let result: Awaited<ReturnType<typeof applyScopedDoctorRepair>>;
+  try {
+    result = await applyScopedDoctorRepair({
+      db: params.db,
+      config: params.config,
+      conversationId: current.stats.conversationId,
+      deps: params.deps,
+      summarize: params.summarize,
+    });
+  } catch (error) {
+    return [
+      ...buildHeaderLines(),
+      "",
+      "🩺 Lossless Claw Doctor Apply",
+      "",
+      buildSection("📍 Current conversation", [
+        buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
+        buildStatLine(
+          "session key",
+          current.stats.sessionKey ? formatCommand(truncateMiddle(current.stats.sessionKey, 44)) : "missing",
+        ),
+        buildStatLine("scope", "this conversation only"),
+      ]),
+      "",
+      buildSection("🛠️ Apply", [
+        buildStatLine("mode", "in-place summary rewrite"),
+        buildStatLine("status", "failed"),
+        buildStatLine("reason", error instanceof Error ? error.message : "unknown repair failure"),
+      ]),
+    ].join("\n");
+  }
+
+  const lines = [
+    ...buildHeaderLines(),
+    "",
+    "🩺 Lossless Claw Doctor Apply",
+    "",
+    buildSection("📍 Current conversation", [
+      buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
+      buildStatLine(
+        "session key",
+        current.stats.sessionKey ? formatCommand(truncateMiddle(current.stats.sessionKey, 44)) : "missing",
+      ),
+      buildStatLine("scope", "this conversation only"),
+    ]),
+    "",
+  ];
+
+  if (result.kind === "unavailable") {
+    lines.push(
+      buildSection("🛠️ Apply", [
+        buildStatLine("mode", "in-place summary rewrite"),
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", result.reason),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(
+    buildSection("🛠️ Apply", [
+      buildStatLine("mode", "in-place summary rewrite"),
+      buildStatLine("detected summaries", formatNumber(stats.total)),
+      buildStatLine("old-marker summaries", formatNumber(stats.old)),
+      buildStatLine("truncated-marker summaries", formatNumber(stats.truncated)),
+      buildStatLine("fallback-marker summaries", formatNumber(stats.fallback)),
+      buildStatLine("repaired summaries", formatNumber(result.repaired)),
+      buildStatLine("unchanged summaries", formatNumber(result.unchanged)),
+      buildStatLine("skipped summaries", formatNumber(result.skipped.length)),
+      buildStatLine(
+        "result",
+        stats.total === 0
+          ? "clean; no writes ran"
+          : result.repaired > 0
+            ? `repaired ${formatNumber(result.repaired)} summary(s) in place`
+            : "no repairs applied",
+      ),
+    ]),
+  );
+
+  if (result.repairedSummaryIds.length > 0) {
+    lines.push(
+      "",
+      buildSection("🧷 Repaired summaries", [result.repairedSummaryIds.join(", ")]),
+    );
+  }
+
+  if (result.skipped.length > 0) {
+    lines.push(
+      "",
+      buildSection(
+        "⚠️ Deferred",
+        result.skipped.map((item) => `${item.summaryId}: ${item.reason}`),
+      ),
+    );
+  }
+
+  return lines.join("\n");
+}
+
 export function createLcmCommand(params: {
   db: DatabaseSync;
   config: LcmConfig;
+  deps?: LcmDependencies;
+  summarize?: LcmSummarizeFn;
 }): OpenClawPluginCommandDefinition {
   return {
     name: "lcm",
     nativeNames: {
       default: "lossless",
     },
-    description: "Show Lossless Claw health and scan for broken summaries.",
+    description: "Show Lossless Claw health, scan broken summaries, and repair scoped doctor issues.",
     acceptsArgs: true,
     handler: async (ctx) => {
       const parsed = parseLcmCommand(ctx.args);
@@ -673,7 +688,17 @@ export function createLcmCommand(params: {
         case "status":
           return { text: await buildStatusText({ ctx, db: params.db, config: params.config }) };
         case "doctor":
-          return { text: await buildDoctorText({ ctx, db: params.db }) };
+          return parsed.apply
+            ? {
+                text: await buildDoctorApplyText({
+                  ctx,
+                  db: params.db,
+                  config: params.config,
+                  deps: params.deps,
+                  summarize: params.summarize,
+                }),
+              }
+            : { text: await buildDoctorText({ ctx, db: params.db }) };
         case "help":
           return { text: buildHelpText(parsed.error) };
       }

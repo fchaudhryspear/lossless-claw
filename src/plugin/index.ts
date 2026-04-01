@@ -1559,6 +1559,7 @@ const lcmPlugin = {
       createLcmCommand({
         db: database,
         config: deps.config,
+        deps,
       }),
     );
 

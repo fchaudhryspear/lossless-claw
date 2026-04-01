@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runLcmMigrations } from "../src/db/migration.js";
 import { getLcmDbFeatures } from "../src/db/features.js";
 import { createLcmDatabaseConnection, closeLcmConnection } from "../src/db/connection.js";
@@ -9,8 +9,9 @@ import { resolveLcmConfig } from "../src/db/config.js";
 import { ConversationStore } from "../src/store/conversation-store.js";
 import { SummaryStore } from "../src/store/summary-store.js";
 import { createLcmCommand, __testing } from "../src/plugin/lcm-command.js";
+import type { LcmSummarizeFn } from "../src/summarize.js";
 
-function createCommandFixture() {
+function createCommandFixture(options?: { summarize?: LcmSummarizeFn }) {
   const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-command-"));
   const dbPath = join(tempDir, "lcm.db");
   const db = createLcmDatabaseConnection(dbPath);
@@ -19,7 +20,7 @@ function createCommandFixture() {
   const conversationStore = new ConversationStore(db, { fts5Available });
   const summaryStore = new SummaryStore(db, { fts5Available });
   const config = resolveLcmConfig({}, { dbPath });
-  const command = createLcmCommand({ db, config });
+  const command = createLcmCommand({ db, config, summarize: options?.summarize });
   return { tempDir, dbPath, command, conversationStore, summaryStore };
 }
 
@@ -391,6 +392,157 @@ describe("lcm command", () => {
     expect(result.text).toContain("fallback: Doctor is conversation-scoped, so no global scan ran.");
     expect(result.text).not.toContain("detected summaries:");
     expect(result.text).not.toContain("sum_unresolved_other");
+  });
+
+  it("keeps doctor apply as a clean scoped no-op when no issues exist", async () => {
+    const summarize = vi.fn(async () => "should not run");
+    const fixture = createCommandFixture({ summarize: summarize as LcmSummarizeFn });
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-apply-clean",
+      sessionKey: "agent:main:telegram:direct:doctor-apply-clean",
+    });
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_clean_apply",
+      conversationId: currentConversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: "healthy summary",
+      tokenCount: 8,
+    });
+
+    const result = await fixture.command.handler(
+      createCommandContext("doctor apply", {
+        sessionKey: "agent:main:telegram:direct:doctor-apply-clean",
+      }),
+    );
+
+    expect(result.text).toContain("🩺 Lossless Claw Doctor Apply");
+    expect(result.text).toContain("scope: this conversation only");
+    expect(result.text).toContain("detected summaries: 0");
+    expect(result.text).toContain("repaired summaries: 0");
+    expect(result.text).toContain("result: clean; no writes ran");
+    expect(summarize).not.toHaveBeenCalled();
+  });
+
+  it("repairs scoped doctor summaries in place and feeds repaired children into parents", async () => {
+    const summarize = vi.fn(async (text: string, _aggressive?: boolean, options?: Parameters<LcmSummarizeFn>[2]) => {
+      if (options?.isCondensed) {
+        return `CONDENSED REPAIR\n${text}`;
+      }
+      return `LEAF REPAIR\n${text}`;
+    });
+    const fixture = createCommandFixture({ summarize: summarize as LcmSummarizeFn });
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-apply-current",
+      sessionKey: "agent:main:telegram:direct:doctor-apply-current",
+    });
+    const [firstMessage, secondMessage] = await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: currentConversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "first broken message",
+        tokenCount: 6,
+      },
+      {
+        conversationId: currentConversation.conversationId,
+        seq: 1,
+        role: "assistant",
+        content: "second broken message",
+        tokenCount: 7,
+      },
+    ]);
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_leaf_fix",
+      conversationId: currentConversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: `broken leaf\n${"[Truncated from 512 tokens]"}`,
+      tokenCount: 11,
+      sourceMessageTokenCount: 13,
+    });
+    await fixture.summaryStore.linkSummaryToMessages("sum_leaf_fix", [
+      firstMessage.messageId,
+      secondMessage.messageId,
+    ]);
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_parent_fix",
+      conversationId: currentConversation.conversationId,
+      kind: "condensed",
+      depth: 1,
+      content: `${"[LCM fallback summary; truncated for context management]"}\nold parent`,
+      tokenCount: 9,
+    });
+    await fixture.summaryStore.linkSummaryToParents("sum_parent_fix", ["sum_leaf_fix"]);
+
+    const result = await fixture.command.handler(
+      createCommandContext("doctor apply", {
+        sessionKey: "agent:main:telegram:direct:doctor-apply-current",
+      }),
+    );
+
+    const repairedLeaf = await fixture.summaryStore.getSummary("sum_leaf_fix");
+    const repairedParent = await fixture.summaryStore.getSummary("sum_parent_fix");
+
+    expect(result.text).toContain("detected summaries: 2");
+    expect(result.text).toContain("repaired summaries: 2");
+    expect(result.text).toContain("result: repaired 2 summary(s) in place");
+    expect(result.text).toContain("sum_leaf_fix, sum_parent_fix");
+    expect(summarize).toHaveBeenCalledTimes(2);
+    expect(repairedLeaf?.content).toContain("LEAF REPAIR");
+    expect(repairedLeaf?.content).not.toContain("[Truncated from");
+    expect(repairedParent?.content).toContain("CONDENSED REPAIR");
+    expect(repairedParent?.content).toContain("LEAF REPAIR");
+    expect(repairedParent?.content).not.toContain("[LCM fallback summary");
+  });
+
+  it("reports doctor apply as unavailable when the current conversation cannot be resolved and does not repair globally", async () => {
+    const summarize = vi.fn(async () => "should not run");
+    const fixture = createCommandFixture({ summarize: summarize as LcmSummarizeFn });
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const otherConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-apply-unresolved-other",
+      sessionKey: "agent:main:telegram:direct:doctor-apply-unresolved-other",
+    });
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_unresolved_apply_other",
+      conversationId: otherConversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: `other summary body\n${"[Truncated from 204 tokens]"}`,
+      tokenCount: 16,
+    });
+
+    const result = await fixture.command.handler(
+      createCommandContext("doctor apply", {
+        sessionKey: "agent:main:telegram:direct:not-stored",
+        sessionId: "doctor-apply-unresolved-missing",
+      }),
+    );
+
+    const untouched = await fixture.summaryStore.getSummary("sum_unresolved_apply_other");
+
+    expect(result.text).toContain("🩺 Lossless Claw Doctor Apply");
+    expect(result.text).toContain("status: unavailable");
+    expect(result.text).toContain(
+      "No LCM conversation is stored yet for active session key `agent:main:telegram:direct:not-stored` or active session id `doctor-apply-unresolved-missing`.",
+    );
+    expect(result.text).toContain("fallback: Doctor apply is conversation-scoped, so no global repair ran.");
+    expect(result.text).not.toContain("detected summaries:");
+    expect(summarize).not.toHaveBeenCalled();
+    expect(untouched?.content).toContain("[Truncated from 204 tokens]");
   });
 
   it("falls back to help text for unsupported subcommands", async () => {
