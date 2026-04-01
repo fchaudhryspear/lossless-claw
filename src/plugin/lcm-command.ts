@@ -110,13 +110,13 @@ function formatCommand(command: string): string {
 
 function buildHeaderLines(): string[] {
   return [
-    `🦀 Lossless Claw v${packageJson.version}`,
+    `**🦀 Lossless Claw v${packageJson.version}**`,
     `Help: ${formatCommand(`${VISIBLE_COMMAND} help`)} · Alias: ${formatCommand(HIDDEN_ALIAS)}`,
   ];
 }
 
 function buildSection(title: string, lines: string[]): string {
-  return [title, ...lines.map((line) => `  ${line}`)].join("\n");
+  return [`**${title}**`, ...lines.map((line) => `  ${line}`)].join("\n");
 }
 
 function buildStatLine(label: string, value: string): string {
@@ -491,7 +491,7 @@ function buildHelpText(error?: string): string {
     "",
     buildSection("🧭 Notes", [
       buildStatLine("subcommands", `Discover them with ${formatCommand(`${VISIBLE_COMMAND} help`)}.`),
-      buildStatLine("short alias", `${formatCommand(HIDDEN_ALIAS)} is still accepted but intentionally hidden from native menus.`),
+      buildStatLine("alias", `${formatCommand(HIDDEN_ALIAS)} is accepted as a shorter alias.`),
       buildStatLine("current conversation", "Uses the active LCM session when the host exposes session identity."),
     ]),
   ];
@@ -550,16 +550,10 @@ async function buildStatusText(params: {
       };
     lines.push(
       buildSection("📍 Current conversation", [
-        buildStatLine(
-          "status",
-          current.source === "session_key_via_session_id"
-            ? "resolved from active session key via session id fallback"
-            : `resolved via ${current.source.replaceAll("_", " ")}`,
-        ),
         buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
         buildStatLine(
           "session key",
-          current.stats.sessionKey ? truncateMiddle(current.stats.sessionKey, 44) : "missing",
+          current.stats.sessionKey ? formatCommand(truncateMiddle(current.stats.sessionKey, 44)) : "missing",
         ),
         buildStatLine("messages", formatNumber(current.stats.messageCount)),
         buildStatLine(

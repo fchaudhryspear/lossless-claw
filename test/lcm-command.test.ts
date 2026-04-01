@@ -117,19 +117,19 @@ describe("lcm command", () => {
     await fixture.summaryStore.linkSummaryToParents("sum_parent", ["sum_leaf"]);
 
     const result = await fixture.command.handler(createCommandContext());
-    expect(result.text).toContain("🦀 Lossless Claw");
+    expect(result.text).toContain("**🦀 Lossless Claw");
     expect(result.text).toContain("Help: `/lossless help`");
     expect(result.text).toContain("Alias: `/lcm`");
-    expect(result.text).toContain("🧩 Plugin");
+    expect(result.text).toContain("**🧩 Plugin**");
     expect(result.text).toContain("enabled: yes");
     expect(result.text).toContain("selected: yes (slot=lossless-claw)");
     expect(result.text).toContain(`db path: ${fixture.dbPath}`);
-    expect(result.text).toContain("🌐 Global");
+    expect(result.text).toContain("**🌐 Global**");
     expect(result.text).toContain("summaries: 2 (1 leaf, 1 condensed)");
     expect(result.text).toContain("stored summary tokens: 75");
     expect(result.text).toContain("summarized source tokens: 22");
     expect(result.text).toContain("warning (1 issue; run `/lossless doctor`)");
-    expect(result.text).toContain("📍 Current conversation");
+    expect(result.text).toContain("**📍 Current conversation**");
     expect(result.text).toContain("status: unavailable");
     expect(result.text).toContain("OpenClaw did not expose an active session key or session id here");
   });
@@ -181,10 +181,10 @@ describe("lcm command", () => {
       }),
     );
 
-    expect(result.text).toContain("📍 Current conversation");
-    expect(result.text).toContain("status: resolved via session key");
+    expect(result.text).toContain("**📍 Current conversation**");
+    expect(result.text).not.toContain("status: resolved via session key");
     expect(result.text).toContain(`conversation id: ${conversation.conversationId}`);
-    expect(result.text).toContain("session key: agent:main:telegram:direct:4242");
+    expect(result.text).toContain("session key: `agent:main:telegram:direct:4242`");
     expect(result.text).not.toContain("session id:");
     expect(result.text).toContain("messages: 2");
     expect(result.text).toContain("summaries: 1 (1 leaf, 0 condensed)");
@@ -219,8 +219,8 @@ describe("lcm command", () => {
       }),
     );
 
-    expect(result.text).toContain("📍 Current conversation");
-    expect(result.text).toContain(
+    expect(result.text).toContain("**📍 Current conversation**");
+    expect(result.text).not.toContain(
       "status: resolved from active session key via session id fallback",
     );
     expect(result.text).toContain(`conversation id: ${conversation.conversationId}`);
@@ -304,7 +304,7 @@ describe("lcm command", () => {
     const result = await fixture.command.handler(createCommandContext("rewrite"));
     expect(result.text).toContain("⚠️ Unknown subcommand `rewrite`.");
     expect(result.text).toContain("`/lossless help`");
-    expect(result.text).toContain("`/lcm` is still accepted but intentionally hidden from native menus.");
+    expect(result.text).toContain("`/lcm` is accepted as a shorter alias.");
   });
 });
 
