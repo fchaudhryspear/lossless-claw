@@ -1558,7 +1558,6 @@ const lcmPlugin = {
       });
     });
     api.on("before_prompt_build", () => ({
-      prependContext: LOSSLESS_RECALL_POLICY_PROMPT,
       prependSystemContext: LOSSLESS_RECALL_POLICY_PROMPT,
     }));
     api.registerContextEngine("lossless-claw", () => lcm);

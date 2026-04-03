@@ -82,7 +82,7 @@ describe("lcm plugin prompt hook", () => {
     resetStartupBannerLogsForTests();
   });
 
-  it("registers before_prompt_build static recall policy through prepend context", async () => {
+  it("registers before_prompt_build static recall policy through system prompt context", async () => {
     const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
     dbPaths.add(dbPath);
 
@@ -111,10 +111,9 @@ describe("lcm plugin prompt hook", () => {
     };
 
     expect(result).toMatchObject({
-      prependContext: expect.any(String),
       prependSystemContext: expect.any(String),
     });
-    expect(result.prependContext).toBe(result.prependSystemContext);
+    expect(result.prependContext).toBeUndefined();
     expect(result.systemPrompt).toBeUndefined();
     expect(result.prependSystemContext).toContain("The lossless-claw plugin is active");
     expect(result.prependSystemContext).toContain(
