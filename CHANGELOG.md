@@ -1,5 +1,27 @@
 # @martian-engineering/lossless-claw
 
+## 0.6.0
+
+### Minor Changes
+
+- [#195](https://github.com/Martian-Engineering/lossless-claw/pull/195) [`8efd2e9`](https://github.com/Martian-Engineering/lossless-claw/commit/8efd2e98a0000edf90953ecbb5060cf9c56baad3) Thanks [@jalehman](https://github.com/jalehman)! - Add explicit `/new` and `/reset` lifecycle handling for OpenClaw sessions.
+
+  `/new` now prunes fresh context from the active conversation while preserving retained summaries by configured depth, and `/reset` now archives the current conversation before starting a fresh active conversation for the same stable session key.
+
+### Patch Changes
+
+- [#255](https://github.com/Martian-Engineering/lossless-claw/pull/255) [`a1bda9b`](https://github.com/Martian-Engineering/lossless-claw/commit/a1bda9becb9914af8cfc5c091ef7f6bcdbdbf199) Thanks [@jalehman](https://github.com/jalehman)! - Limit first-time fork bootstrap imports so new conversations only inherit the newest slice of raw parent history instead of loading the entire parent transcript into lossless memory.
+
+- [#230](https://github.com/Martian-Engineering/lossless-claw/pull/230) [`ca51445`](https://github.com/Martian-Engineering/lossless-claw/commit/ca51445c52e4c1c102023f0336a9d7e29f78c226) Thanks [@liu51115](https://github.com/liu51115)! - Fix compaction auth circuit breaker handling so auth failures during multi-pass sweeps still trip the breaker, while failures for one resolved summarizer no longer block unrelated providers or sessions.
+
+- [#178](https://github.com/Martian-Engineering/lossless-claw/pull/178) [`0613b7f`](https://github.com/Martian-Engineering/lossless-claw/commit/0613b7fc7707a4ccea1ffbf7d2c8be82bd4dcee6) Thanks [@catgodtwno4](https://github.com/catgodtwno4)! - Fix summarizer auth-error detection so real provider auth envelopes nested under `data` or `body` still trigger handling, while successful summary payloads in `message` or `response` no longer cause false-positive auth failures.
+
+- [#242](https://github.com/Martian-Engineering/lossless-claw/pull/242) [`3fe823f`](https://github.com/Martian-Engineering/lossless-claw/commit/3fe823f4dcec720c158f712fa4c4487482e80ade) Thanks [@jalehman](https://github.com/jalehman)! - Move static lossless recall policy guidance into the plugin prompt hook while keeping `systemPromptAddition` limited to session-specific compaction reminders.
+
+  This makes the stable recall-order guidance cacheable, clarifies that lossless-claw takes precedence over generic memory recall only for compacted conversation history, and leaves deep-compaction expand-before-asserting guidance in the dynamic assembled prompt.
+
+- [#252](https://github.com/Martian-Engineering/lossless-claw/pull/252) [`e843638`](https://github.com/Martian-Engineering/lossless-claw/commit/e8436388311e110b983d280e2157a9f013e41d4e) Thanks [@jalehman](https://github.com/jalehman)! - Sync the published plugin manifest schema with the runtime-supported plugin config surface so documented config keys are accepted by OpenClaw. This also removes the undocumented `autocompactDisabled` setting from the advertised config surface because it was parsed but not wired to runtime behavior.
+
 ## 0.5.3
 
 ### Patch Changes
